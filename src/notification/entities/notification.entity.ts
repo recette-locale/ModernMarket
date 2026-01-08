@@ -59,7 +59,7 @@ export class Notification {
   };
 
 
-  @Column({ type: 'timestamp', nullable: true })
+  @Column({ type: 'timestamp', nullable: true })//enleve
   scheduledAt: Date; // Pour les notifications programmées
 
   @Column({ type: 'timestamp', nullable: true ,default: () => 'CURRENT_TIMESTAMP'})
@@ -68,7 +68,7 @@ export class Notification {
   @Column({ type: 'timestamp', nullable: true })
   readAt: Date;
 
-  @CreateDateColumn()
+  @CreateDateColumn()//enleve
   createdAt: Date;
 
   @UpdateDateColumn()

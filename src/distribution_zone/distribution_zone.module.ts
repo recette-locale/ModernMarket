@@ -5,14 +5,14 @@ import { TypeOrmModule } from '@nestjs/typeorm';
 import { DistributionZone } from './entities/distribution_zone.entity';
 import { ZoneModule } from 'src/zone/zone.module';
 import { Zone } from 'luxon';
-import { EventsModule } from 'src/events/events.module';
 import { HttpModule } from '@nestjs/axios';
+import { SocketModule } from 'src/socket/socket.module';
 @Module({
   imports: [
     TypeOrmModule.forFeature([DistributionZone, Zone]),
     ZoneModule,
-    EventsModule,
-    HttpModule
+    HttpModule,
+    SocketModule
   ],
   controllers: [DistributionZoneController],
   providers: [DistributionZoneService],

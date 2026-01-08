@@ -10,23 +10,26 @@ import { NotificationService } from 'src/notification/notification.service';
 import * as PDFDocument from 'pdfkit';
 import * as fs from 'fs';
 import { join } from 'path';
-import { EventsService } from 'src/events/events.service';
 import { HttpService } from '@nestjs/axios';
 import { lastValueFrom } from 'rxjs';
-
+import { SocketService } from 'src/socket/socket.service';
 import { WritableStreamBuffer } from 'stream-buffers';
-
+import { ConfigService } from '@nestjs/config';
 @Injectable()
 export class PaiementService {
+  private gatewayBaseUrl: string;
   constructor(
     @InjectRepository(Paiement)
     private readonly paieRepository: Repository<Paiement>,
     private readonly locationService: LocationService,
     private readonly paiementLocationService: PaiementLocationService,
-    private readonly eventsService: EventsService,
     private readonly notificationService: NotificationService,
-    private readonly httpService: HttpService
-  ) { }
+    private readonly httpService: HttpService,
+    private readonly configService: ConfigService,
+    private readonly socketService: SocketService,
+  ) {
+    this.gatewayBaseUrl = this.configService.get<string>('GATEWAY_BASE_URL')!;
+  }
 
   async create(createPaiementDto: CreatePaiementDto): Promise<any> {
     const queryRunner = this.paieRepository.manager.connection.createQueryRunner();
@@ -55,8 +58,14 @@ export class PaiementService {
 
 
       if (savedPaiement) {
-        this.eventsService.broadcastToAll('paiement_created', newPaiement);
-
+        const data = {
+          authorId: '550e8400-e29b-41d4-a716-446655440003',
+          destinationId: null,
+          typeNotification: 'broadcastToAll',
+          message: 'paiement_created',
+          ressource: savedPaiement
+        };
+        this.socketService.sendNotification(data);
         console.log("envoie");
       }
 
@@ -88,17 +97,20 @@ export class PaiementService {
           }
 
           const { paiementLocation, qrCode } = await this.paiementLocationService.create(locDto, queryRunner);
-       
+
           createdPaiementLocations.push(paiementLocation);
+
+          const updatedLocation = await this.locationService.findOne(locationId);
+
+          if (updatedLocation.local.statut === 'DISPONIBLE') {
+            await this.locationService.updateLocalStatusToRented(locationId);
+            console.log(`🏠 Local ${updatedLocation.local.numero} marqué comme LOUE.`);
+            contratPdf = await this.locationService.generateContratBail(locationId);
+          } else {
+            console.log(`ℹ️ Local déjà loué.`);
+          }
         }
-        if (location.local.statut == 'DISPONIBLE') {
-          await this.locationService.updateLocalStatusToRented(locationId);
-          console.log(`🏠 Local ${location.local.numero || location.localId} marqué comme LOUE.`);
-          contratPdf = await this.locationService.generateContratBail(locationId);
-          console.log('📄 Contrat de bail généré (car le local vient d’être loué)');
-        } else {
-          console.log(`ℹ️ Local ${location.local.numero || location.localId} déjà marqué comme LOUE, aucune mise à jour.`);
-        }
+
 
         // Création de la notification de succès
         const userId = location.id_user;

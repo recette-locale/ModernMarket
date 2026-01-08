@@ -1,4 +1,4 @@
-import { Injectable, NotFoundException, ForbiddenException, BadRequestException, ServiceUnavailableException, InternalServerErrorException} from '@nestjs/common';
+import { Injectable, NotFoundException, ForbiddenException, BadRequestException, ServiceUnavailableException, InternalServerErrorException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { Notification } from './entities/notification.entity';
@@ -7,15 +7,14 @@ import { Paiementlocation } from 'src/paiement_location/entities/paiement_locati
 import { Local } from 'src/local/entities/local.entity';
 import axios from 'axios';
 import { Brackets } from 'typeorm';
-import { EventsService } from 'src/events/events.service';
 import { Between } from 'typeorm';
-import { start } from 'repl';
-
+import { ConfigService } from '@nestjs/config';
 import { LocalService } from 'src/local/local.service';
 import { forwardRef, Inject } from '@nestjs/common';
-
+import { SocketService } from 'src/socket/socket.service';
 @Injectable()
 export class NotificationService {
+  private gatewayBaseUrl: string;
   constructor(
     @InjectRepository(Notification)
     private readonly notifRepository: Repository<Notification>,
@@ -29,11 +28,15 @@ export class NotificationService {
     @InjectRepository(Local)
     private readonly localRepository: Repository<Local>,
 
-    private readonly eventsService: EventsService,
     @Inject(forwardRef(() => LocalService)) // ✅ utilise forwardRef pour briser le cercle
     private localService: LocalService,
+    private readonly configService: ConfigService,
+    private readonly socketService: SocketService,
 
-  ) { }
+  ) {
+    this.gatewayBaseUrl = this.configService.get<string>('GATEWAY_BASE_URL')!;
+
+  }
 
 
   async createLocationNotification(
@@ -127,7 +130,6 @@ export class NotificationService {
 
     const savedNotification = await this.notifRepository.save(notification);
 
-    this.eventsService.sendToUser(userId, 'votre_location_created', savedNotification);
     return savedNotification;
   }
 
@@ -538,7 +540,6 @@ export class NotificationService {
 
       await this.notifRepository.save(historique);
       this.localService.updateDateScan(data.local_id);
-      this.eventsService.broadcastToAll('location_critique', historique);
       return {
         message: 'Historique enregistré avec succès',
         historique,
@@ -822,18 +823,18 @@ export class NotificationService {
   }
 
   async remove(id_notification: string) {
-  // Vérifier si la zone existe
-  const zone = await this.notifRepository.findOne({ where: { id_notification } });
-  if (!zone) {
-    throw new NotFoundException(`Notification avec id ${id_notification} introuvable`);
+    // Vérifier si la zone existe
+    const zone = await this.notifRepository.findOne({ where: { id_notification } });
+    if (!zone) {
+      throw new NotFoundException(`Notification avec id ${id_notification} introuvable`);
+    }
+
+    // Supprimer
+    await this.notifRepository.delete(id_notification);
+
+    return {
+      message: `Notification ${id_notification} supprimée avec succès`,
+      success: true,
+    };
   }
-
-  // Supprimer
-  await this.notifRepository.delete(id_notification);
-
-  return {
-    message: `Notification ${id_notification} supprimée avec succès`,
-    success: true,
-  };
-}
 }

@@ -1,25 +1,31 @@
-FROM node:20-slim
+# 1 — Build stage
+FROM node:20-alpine AS builder
 
 WORKDIR /app
 
-# Installer les dépendances de l'application
 COPY package*.json ./
+RUN npm ci
 
-RUN npm install
-
-
-# Copier tous les fichiers du projet
 COPY . .
-
-# Créer un build statique pour l'application (supposons que c'est un projet React par exemple)
 RUN npm run build
 
-# Utilisation de l'ARG pour définir la variable d'environnement pour DATABASE_URL
+# 2 — Runtime stage
+FROM node:20-alpine
+
+WORKDIR /app
+
+# Copy only what is needed for production
+COPY --from=builder /app/package*.json ./
+COPY --from=builder /app/node_modules ./node_modules
+COPY --from=builder /app/dist ./dist
+
+# Environment variables
 ARG POSTGRES_HOST=""
 ARG POSTGRES_PORT=""
 ARG POSTGRES_DATABASE=""
 ARG POSTGRES_USER=""
 ARG POSTGRES_PASSWORD=""
+
 ENV POSTGRES_HOST=${POSTGRES_HOST}
 ENV POSTGRES_PORT=${POSTGRES_PORT}
 ENV POSTGRES_DATABASE=${POSTGRES_DATABASE}
@@ -27,8 +33,6 @@ ENV POSTGRES_USER=${POSTGRES_USER}
 ENV POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
 ENV PORT=5033
 
-# Exposer le port que nous utiliserons pour le serveur 'serve'
 EXPOSE 5033
 
-# Command to run the application
-CMD ["node", "dist/main", "--port", "${PORT}"]
+CMD ["node", "dist/src/main.js"]

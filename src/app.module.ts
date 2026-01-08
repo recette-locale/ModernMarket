@@ -13,8 +13,8 @@ import { NotificationModule } from './notification/notification.module';
 import { DistributionZoneModule } from './distribution_zone/distribution_zone.module';
 import { TypeLocalModule } from './type_local/type_locale.module';
 import { ScheduleModule } from '@nestjs/schedule';
-import { EventsModule } from './events/events.module';
-import { EventsGateway } from './events/events.gateway';
+import { SocketModule } from './socket/socket.module';
+
 
 
 @Module({
@@ -40,11 +40,11 @@ import { EventsGateway } from './events/events.gateway';
     NotificationModule,
     TypeLocalModule,
     DistributionZoneModule,
-    EventsModule,
+    SocketModule,
 
 
   ],
   controllers: [AppController],
-  providers: [AppService,EventsGateway],
+  providers: [AppService],
 })
 export class AppModule { }

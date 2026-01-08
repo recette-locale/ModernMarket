@@ -26,13 +26,11 @@ import {
 import {
   ApiTags, ApiOperation, ApiBody, ApiQuery, ApiResponse, ApiParam
 } from '@nestjs/swagger';
-import { EventsService } from 'src/events/events.service';
 
 @ApiTags('notifications')
 @Controller('notifications')
 export class NotificationController {
   constructor(private readonly notificationService: NotificationService,
-    private readonly eventsService: EventsService
   ) { }
 
 

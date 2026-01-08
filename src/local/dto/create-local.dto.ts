@@ -26,4 +26,10 @@ export class CreateLocalDto {
      })
     @IsNumber()
     longitude: number;
+
+    @ApiProperty({ description: 'La rotation du local en degrés' ,
+        example: 45
+     })
+    @IsNumber()
+    rotation: number;
 }

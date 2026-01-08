@@ -3,14 +3,14 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { Raw, Repository } from 'typeorm';
 import { CreateTypeLocalDto } from './dto/create-type_locale.dto';
 import { Typelocal } from './entities/type_locale.entity';
-import { EventsService } from 'src/events/events.service';
+import { SocketService } from 'src/socket/socket.service';
 @Injectable()
 export class TypeLocalService {
   repo: any;
   constructor(
     @InjectRepository(Typelocal)
     private readonly typeLocalRepository: Repository<Typelocal>,
-    private readonly eventsService: EventsService,
+    private readonly socketService: SocketService,
   ) { }
 
   async create(createTypeLocalDto: CreateTypeLocalDto): Promise<Typelocal> {
@@ -26,9 +26,19 @@ export class TypeLocalService {
       throw new BadRequestException('Ce type local existe déjà dans cette municipalité.');
     }
 
-    const typeLocal = this.typeLocalRepository.create(createTypeLocalDto);
-    this.eventsService.broadcastToAll('type_local_created', typeLocal);
-    return await this.typeLocalRepository.save(typeLocal);
+    let typeLocal = this.typeLocalRepository.create(createTypeLocalDto);
+    typeLocal = await this.typeLocalRepository.save(typeLocal);
+
+    const data = {
+      authorId: '550e8400-e29b-41d4-a716-446655440003',
+      destinationId: null,
+      typeNotification: 'broadcastToAll',
+      message: 'type_local_created',
+      ressource: typeLocal
+    };
+
+    this.socketService.sendNotification(data);
+    return typeLocal;
   }
 
   async findAll(municipalityId: string, lang: 'mg' | 'fr', page: number = 1, limit: number = 10): Promise<{
@@ -76,15 +86,26 @@ export class TypeLocalService {
   }
 
   async update(municipalityId: string, id_type_local: string, updateDto: Partial<CreateTypeLocalDto>): Promise<Typelocal> {
-    const typeLocal = await this.typeLocalRepository.findOne({
+    let typeLocal = await this.typeLocalRepository.findOne({
       where: { municipalityId, id_type_local }
     });
     if (!typeLocal) {
       throw new NotFoundException(`TypeLocal with id ${id_type_local} in municipality ${municipalityId} not found`);
     }
+    
     Object.assign(typeLocal, updateDto);
-    this.eventsService.broadcastToAll('type_local_updated', typeLocal);
-    return await this.typeLocalRepository.save(typeLocal);
+
+    typeLocal = await this.typeLocalRepository.save(typeLocal);
+    const data = {
+      authorId: '550e8400-e29b-41d4-a716-446655440003',
+      destinationId: null,
+      typeNotification: 'broadcastToAll',
+      message: 'type_local_updated',
+      ressource: typeLocal
+    };
+
+    this.socketService.sendNotification(data);
+    return typeLocal;
   }
 
   async remove(municipalityId: string, id: string): Promise<{ message: string; status: number; data: any }> {

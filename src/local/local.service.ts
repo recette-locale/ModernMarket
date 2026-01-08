@@ -9,13 +9,15 @@ import { Typelocal } from 'src/type_local/entities/type_locale.entity';
 import { validate as isUUID } from 'uuid';
 import { HttpService } from '@nestjs/axios';
 import { firstValueFrom } from 'rxjs';
-import { EventsService } from 'src/events/events.service';
 import { Location as LocationEntity } from 'src/location/entities/location.entity';
 import { DistributionZoneService } from 'src/distribution_zone/distribution_zone.service';
 import { NotificationService } from 'src/notification/notification.service';
 import { DistributionZone } from 'src/distribution_zone/entities/distribution_zone.entity';
+import { SocketService } from 'src/socket/socket.service';
+import { ConfigService } from '@nestjs/config';
 @Injectable()
 export class LocalService {
+  private gatewayBaseUrl: string;
   constructor(
     @InjectRepository(Local)
     private readonly localRepository:
@@ -34,10 +36,14 @@ export class LocalService {
     private readonly distZoneRepository: Repository<DistributionZone>,
     private readonly httpService: HttpService,
 
-    private readonly eventsService: EventsService,
     private readonly distZoneService: DistributionZoneService,
     private readonly notifService: NotificationService,
-  ) { }
+    private readonly configService: ConfigService,
+    private readonly socketService: SocketService,
+  ) {
+    this.gatewayBaseUrl = this.configService.get<string>('GATEWAY_BASE_URL')!;
+
+  }
 
   async existingLocalTest(createLocalDto: CreateLocalDto) {
     const existingLocal = await this.localRepository.findOne({
@@ -87,9 +93,18 @@ export class LocalService {
 
 
     try {
-      const local = this.localRepository.create(createLocalDto);
-      this.eventsService.broadcastToAll('local_created', local);
-      return await this.localRepository.save(local)
+      let local = this.localRepository.create(createLocalDto);
+      local = await this.localRepository.save(local);
+      const data = {
+        authorId: '550e8400-e29b-41d4-a716-446655440003',
+        destinationId: null,
+        typeNotification: 'broadcastToAll',
+        message: 'local_created',
+        ressource: local
+      };
+
+      this.socketService.sendNotification(data);
+      return local;
     } catch (error) {
       throw new BadRequestException(
         `Failed to create zone. Please check your input data.`,
@@ -264,11 +279,21 @@ export class LocalService {
     id_local: string,
     updateLocalDto: UpdateLocalDto
   ) {
-    const local = await this.findOne(municipalityId, id_local);
+    let local = await this.findOne(municipalityId, id_local);
 
     Object.assign(local, updateLocalDto);
-    this.eventsService.broadcastToAll('local_updated', local);
-    return await this.localRepository.save(local);
+    local = await this.localRepository.save(local);
+
+    const data = {
+      authorId: '550e8400-e29b-41d4-a716-446655440003',
+      destinationId: null,
+      typeNotification: 'broadcastToAll',
+      message: 'local_updated',
+      ressource: local
+    };
+
+    this.socketService.sendNotification(data);
+    return local;
   }
 
   async updateDateScan(id_local: string) {

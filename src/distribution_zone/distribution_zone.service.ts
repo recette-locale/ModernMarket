@@ -6,22 +6,28 @@ import { Repository } from 'typeorm';
 import { DistributionZone } from './entities/distribution_zone.entity';
 import { ZoneService } from 'src/zone/zone.service';
 import { Zone } from 'src/zone/entities/zone.entity';
-import { EventsService } from 'src/events/events.service';
 import { HttpService } from '@nestjs/axios';
 import { firstValueFrom } from 'rxjs';
 import { IsNull } from 'typeorm';
-
-
+import { ConfigService } from '@nestjs/config';
+import { SocketService } from 'src/socket/socket.service';
 
 @Injectable()
 export class DistributionZoneService {
+  private gatewayBaseUrl: string;
+
   constructor(
     @InjectRepository(DistributionZone)
     private readonly distributionZoneRepository: Repository<DistributionZone>,
     private readonly zoneService: ZoneService,
-    private readonly eventsService: EventsService,
+    private readonly socketService: SocketService,
+    private readonly configService: ConfigService,
     private readonly httpService: HttpService,
-  ) { }
+  ) {
+    this.gatewayBaseUrl = this.configService.get<string>('GATEWAY_BASE_URL')!;
+
+
+  }
 
   async create(createDistributionZoneDto: CreateDistributionZoneDto) {
     const zone = await this.zoneService.findOneById(createDistributionZoneDto.zoneId);
@@ -61,11 +67,28 @@ export class DistributionZoneService {
       throw new BadRequestException(`L'utilisateur ${createDistributionZoneDto.id_user} est déjà affecté à la zone ${createDistributionZoneDto.zoneId} avec le statut actif.`);
     }
 
-    const distributionZone = this.distributionZoneRepository.create(createDistributionZoneDto);
-    this.eventsService.broadcastToAll('distribution_zone_created', distributionZone);
+    let distributionZone = this.distributionZoneRepository.create(createDistributionZoneDto);
 
-    this.eventsService.sendToUser(createDistributionZoneDto.id_user, 'vous_avez_une_zone', distributionZone);
-    return await this.distributionZoneRepository.save(distributionZone);
+    distributionZone = await this.distributionZoneRepository.save(distributionZone);
+    const data = {
+      authorId: '550e8400-e29b-41d4-a716-446655440003',
+      destinationId: distributionZone.id_user,
+      typeNotification: 'sendToUser',
+      message: 'vous_avez_une_zone',
+      ressource: distributionZone
+    };
+    const data1 = {
+      authorId: '550e8400-e29b-41d4-a716-446655440003',
+      destinationId: null,
+      typeNotification: 'broadcastToAll',
+      message: 'distribution_zone_created',
+      ressource: distributionZone
+    };
+    this.socketService.sendNotification(data1);
+    // Envoie à tous les clients connectés via ton SocketService
+    this.socketService.sendNotification(data);
+
+    return distributionZone;
   }
 
   async findAll(municipalityId: string, page: number = 1, limit: number = 10): Promise<{ data: DistributionZone[], total: number }> {
@@ -146,7 +169,7 @@ export class DistributionZoneService {
   async update(id_distribution_zone: string, municipalityId: string, updateDistributionZoneDto: UpdateDistributionZoneDto) {
     const distributionZone = await this.findOne(id_distribution_zone, municipalityId);
     Object.assign(distributionZone, updateDistributionZoneDto);
-    this.eventsService.broadcastToAll('distribution_zone_updated', distributionZone);
+
     return await this.distributionZoneRepository.save(distributionZone);
   }
 

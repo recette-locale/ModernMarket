@@ -6,12 +6,11 @@ import { Zone } from './entities/zone.entity';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { HttpService } from '@nestjs/axios';
 
-import { EventsModule } from 'src/events/events.module';
-
+import { SocketModule } from 'src/socket/socket.module';
 @Module({
   imports: [TypeOrmModule.forFeature([Zone]),
   HttpModule.register({ timeout: 5000, maxRedirects: 5 }),
-    EventsModule
+  SocketModule
   ],
   controllers: [ZoneController],
   providers: [ZoneService],

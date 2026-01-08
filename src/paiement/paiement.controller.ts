@@ -35,6 +35,8 @@ export class PaiementController {
     type: String,
     description: 'Date de fin pour filtrer (format ISO, ex: 2025-09-30)'
   })
+
+  
   async findAll(
     @Query('municipalityId', ParseIntPipe) municipalityId: string,
     // @Query('userId') userId?: string,

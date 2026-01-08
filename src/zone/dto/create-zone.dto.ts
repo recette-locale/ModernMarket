@@ -9,6 +9,10 @@ export class CreateZoneDto {
 
   @ApiProperty({ description: 'ID de la municipalité' })
   @IsString()
+  municipalityId: string;
+
+  @ApiProperty({ description: 'ID du fokontany' })
+  @IsString()
   formatted_id: string;
 
    @ApiProperty({

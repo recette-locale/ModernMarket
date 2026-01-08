@@ -26,6 +26,9 @@ export class Local {
     @Column('decimal' , {precision:12 , scale: 6 })
     longitude: number;
 
+    @Column('decimal' , {precision:5 , scale: 2 })
+    rotation: number;
+
     @ManyToOne(() => Zone, (zone) => zone.locaux, { onDelete: 'CASCADE' })
     @JoinColumn({ name: "zoneId" })  // fait le lien entre zoneId et Zone
     zone: Zone;

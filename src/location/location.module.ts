@@ -15,11 +15,12 @@ import { Typelocal } from 'src/type_local/entities/type_locale.entity';
 import { LocalService } from 'src/local/local.service';
 import { DistributionZoneService } from 'src/distribution_zone/distribution_zone.service';
 import { ZoneService } from 'src/zone/zone.service';
-
+import { ZoneModule } from 'src/zone/zone.module';
 import { PaiementLocationModule } from 'src/paiement_location/paiement_location.module';
 import { NotificationModule } from 'src/notification/notification.module';
-import { EventsModule } from 'src/events/events.module';
-
+import { DistributionZoneModule } from 'src/distribution_zone/distribution_zone.module';
+import { LocalModule } from 'src/local/local.module';
+import { SocketModule } from 'src/socket/socket.module';
 @Module({
   imports: [
     TypeOrmModule.forFeature([
@@ -32,16 +33,16 @@ import { EventsModule } from 'src/events/events.module';
     ]),
     forwardRef(() => PaiementLocationModule), // pour PaiementLocationService
     forwardRef(() => NotificationModule), // pour NotificationService
-    forwardRef(() => EventsModule), // pour EventsService
     ScheduleModule.forRoot(),
-    HttpModule,
+    HttpModule,ZoneModule,
+    LocalModule,
+    DistributionZoneModule,
+    SocketModule
   ],
   controllers: [LocationController],
   providers: [
     LocationService,
-    LocalService,
-    DistributionZoneService,
-    ZoneService,
+  
   ],
   exports: [LocationService],
 })
