@@ -73,7 +73,7 @@ export class ZoneService {
 
   async create(createZoneDto: CreateZoneDto) {
     // Vérifier que la fokontany existe dans le service externe
-    //const fokontany = await this.existingFokontany(createZoneDto.formatted_id);
+    const fokontany = await this.existingFokontany(createZoneDto.formatted_id);
 
     const municipalityId = createZoneDto.municipalityId;
     

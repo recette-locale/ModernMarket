@@ -754,24 +754,34 @@ export class LocationService {
   async generateUserQrCode(userId: string): Promise<{ userId: string; qrCode: string }> {
     try {
       // Vérifier que l'utilisateur existe
-      const response = await axios.get(`https://gateway.tsirylab.com/serviceauth/users/${userId}`);
+      // const response = await axios.get(${this.gatewayBaseUrl}/serviceauth/users/${userId});
 
-      if (!response.data || !response.data.user_id) {
-        throw new NotFoundException(`Utilisateur avec ID ${userId} introuvable`);
-      }
+      // if (!response.data || !response.data.user_id) {
+      //   throw new NotFoundException(Utilisateur avec ID ${userId} introuvable);
+      // }
 
-      // Générer un QRCode encodant l'userId
-      const qrCodeDataUrl = await QRCode.toDataURL(userId);
+      // Générer un QRCode au format SVG (ne nécessite pas canvas)
+      const qrCodeSvg = await QRCode.toString(userId, {
+        type: 'svg',
+        color: {
+          dark: '#000000',
+          light: '#FFFFFF'
+        }
+      });
+
+      // Convertir le SVG en base64 pour créer une Data URL
+      const base64Svg = Buffer.from(qrCodeSvg).toString('base64');
+      const qrCodeDataUrl = data:image/svg+xml;base64,${base64Svg};
 
       return {
-        userId: response.data.user_id,
+        userId: userId,
         qrCode: qrCodeDataUrl, // ⚡ base64 utilisable dans <img src="...">
       };
-    } catch (error) {
-      throw new NotFoundException(`Impossible de générer le QRCode pour l'utilisateur ${userId}`);
+    } catch (error: any) {
+      throw new NotFoundException(Impossible de générer le QRCode pour l'utilisateur ${userId}: ${error.message || error});
     }
   }
-
+  
   async findOccupiedPeriods(municipalityId: string, localId: string): Promise<Location[]> {
     const occupiedPeriods = await this.locationRepository.find({
       where: {
