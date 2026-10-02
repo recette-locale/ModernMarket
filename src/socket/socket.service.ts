@@ -1,4 +1,3 @@
-// notification-socket.service.ts
 import { Injectable, OnModuleInit, OnModuleDestroy } from '@nestjs/common';
 import { io, Socket } from 'socket.io-client';
 import { ConfigService } from '@nestjs/config';

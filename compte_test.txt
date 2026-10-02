@@ -1,0 +1,66 @@
+{
+  "data": [
+    {
+      "commune_id": 1582,
+      "logo_commune": null,
+      "name": "Fianarantsoa",
+      "name_fr": null,
+      "code": null,
+      "postal_code": null,
+      "phone_number": null,
+      "email": null,
+      "description": null,
+      "isMember": true,
+      "isUrban": true,
+      "district": {
+        "district_id": 123,
+        "name": "Fianarantsoa I",
+        "name_fr": null,
+        "region": {
+          "region_id": 5,
+          "name": "Matsiatra ambony",
+          "name_fr": null,
+          "province": {
+            "province_id": 3,
+            "name": "Fianarantsoa",
+            "name_fr": null,
+            "formatted_id": "700000000000",
+            "form_url": "provinces/700000000000/form"
+          },
+          "formatted_id": "701600000000",
+          "form_url": "regions/701600000000/form"
+        },
+        "formatted_id": "701635000000",
+        "form_url": "districts/701635000000/form"
+      },
+      "region": {
+        "region_id": 5,
+        "name": "Matsiatra ambony",
+        "name_fr": null,
+        "province": {
+          "province_id": 3,
+          "name": "Fianarantsoa",
+          "name_fr": null,
+          "formatted_id": "700000000000",
+          "form_url": "provinces/700000000000/form"
+        },
+        "formatted_id": "701600000000",
+        "form_url": "regions/701600000000/form"
+      },
+      "formatted_id": "701635700000",
+      "form_url": "communes/701635700000/form",
+      "children_count": 7
+    }
+  ],
+  "total": 1
+}
+ {
+    "fokotany_id": 2347,
+    "name": "Soatsihadino",
+    "name_fr": null,
+    "formatted_id": "701635701959",
+    "form_url": "fokotanys/701635701959/form"
+  },
+
+  end point dashboard
+  

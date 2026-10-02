@@ -1,4 +1,4 @@
-import { Inject, Injectable, BadRequestException, ServiceUnavailableException, NotFoundException } from '@nestjs/common';
+import { Inject, Injectable, BadRequestException, ServiceUnavailableException, NotFoundException, HttpException } from '@nestjs/common';
 import { CreateLocalDto } from './dto/create-local.dto';
 import { UpdateLocalDto } from './dto/update-local.dto';
 import { InjectRepository } from '@nestjs/typeorm';
@@ -15,6 +15,7 @@ import { NotificationService } from 'src/notification/notification.service';
 import { DistributionZone } from 'src/distribution_zone/entities/distribution_zone.entity';
 import { SocketService } from 'src/socket/socket.service';
 import { ConfigService } from '@nestjs/config';
+import { CreateManyLocalDto } from './dto/create-many-local.dto';
 @Injectable()
 export class LocalService {
   private gatewayBaseUrl: string;
@@ -76,6 +77,82 @@ export class LocalService {
     }
   }
 
+async createMany(localsDto: CreateManyLocalDto[]) {
+  if (!localsDto || localsDto.length === 0) {
+    throw new BadRequestException(
+      'La liste des locaux ne peut pas être vide.',
+    );
+  }
+
+  try {
+    // Vérifications de tous les locaux avant insertion
+    for (const localDto of localsDto) {
+
+      // Vérifier que la zone existe
+      await this.existingZoneTest(localDto.zoneId);
+
+      // Vérifier que le type de local existe
+      await this.existingType(localDto.typelocalId);
+
+      // Vérifier que le local n'existe pas déjà
+      await this.existingLocalTest(localDto);
+    }
+
+    // Vérifier/récupérer les zones
+    for (const localDto of localsDto) {
+      const zone = await this.zoneRepository.findOne({
+        where: { id_zone: localDto.zoneId },
+      });
+
+      if (!zone) {
+        throw new NotFoundException(
+          `Zone with id '${localDto.zoneId}' not found`,
+        );
+      }
+    }
+
+    // Création des entités
+    const locaux = this.localRepository.create(localsDto);
+
+    // Sauvegarde de tous les locaux
+    const savedLocaux = await this.localRepository.save(locaux);
+
+    // Notification pour chaque local créé
+    for (const local of savedLocaux) {
+      const data = {
+        authorId: '550e8400-e29b-41d4-a716-446655440003',
+        destinationId: null,
+        typeNotification: 'broadcastToAll',
+        message: 'local_created',
+        ressource: local,
+      };
+
+      this.socketService.sendNotification(data);
+    }
+
+    return {
+      success: true,
+      message: `${savedLocaux.length} locaux créés avec succès.`,
+      data: savedLocaux,
+    };
+
+  } catch (error: unknown) {
+
+    // Important : conserver les exceptions NestJS
+    if (error instanceof HttpException) {
+      throw error;
+    }
+
+    console.error('Erreur création des locaux:', error);
+
+    const message =
+      error instanceof Error ? error.message : 'Erreur inconnue';
+
+    throw new BadRequestException(
+      `Impossible de créer les locaux. ${message}`,
+    );
+  }
+}
   async create(createLocalDto: CreateLocalDto) {
     await this.existingZoneTest(createLocalDto.zoneId);
     await this.existingType(createLocalDto.typelocalId);
