@@ -1,10 +1,11 @@
+// notification-socket.service.ts
 import { Injectable, OnModuleInit, OnModuleDestroy } from '@nestjs/common';
 import { io, Socket } from 'socket.io-client';
 import { ConfigService } from '@nestjs/config';
 
 @Injectable()
-export class SocketService implements OnModuleInit, OnModuleDestroy {
-  private socket: Socket;
+export class SocketService implements  OnModuleDestroy {
+  private socket: Socket | undefined;;
   private gatewayBaseUrl: string;
 
   constructor(private readonly configService: ConfigService) {
@@ -12,27 +13,25 @@ export class SocketService implements OnModuleInit, OnModuleDestroy {
     this.gatewayBaseUrl = this.configService.get<string>('GATEWAY_BASE_URL')!;
   }
 
-  onModuleInit() {
-    console.log("hello - initialisation SocketService");
+  // onModuleInit() {
+  //   // Connexion au serveur Socket.IO
+  //   this.socket = io(`${this.gatewayBaseUrl}/serviceflotte`, {
+  //     path: '/serviceflotte/socket.io',
+  //     query: { uuid: '550e8400-e29b-41d4-a716-446655440003' },
+  //   });
 
-    // Connexion au serveur Socket.IO
-    this.socket = io(`${this.gatewayBaseUrl}/serviceflotte`, {
-      path: '/serviceflotte/socket.io',
-      query: { uuid: '550e8400-e29b-41d4-a716-446655440003' },
-    });
+  //   this.socket.on('connect', () => {
+  //     console.log('✅ Connecté au serveur Socket.IO Express avec id:', this.socket.id);
+  //   });
 
-    this.socket.on('connect', () => {
-      console.log('✅ Connecté au serveur Socket.IO Express avec id:', this.socket.id);
-    });
+  //   this.socket.on('notifRecetteLocaleReceived', (data) => {
+  //     console.log('🔔 Notification reçue côté NestJS:', data);
+  //   });
 
-    this.socket.on('notifRecetteLocaleReceived', (data) => {
-      console.log('🔔 Notification reçue côté NestJS:', data);
-    });
-
-    this.socket.on('connect_error', (err) => {
-      console.error('❌ Erreur de connexion Socket.IO:', err.message);
-    });
-  }
+  //   this.socket.on('connect_error', (err) => {
+  //     console.error('❌ Erreur de connexion Socket.IO:', err.message);
+  //   });
+  // }
 
   sendNotification(payload: any) {
     if (this.socket?.connected) {

@@ -17,7 +17,7 @@ export class Local {
     @Column({type: 'uuid' })
     zoneId: string;   // ici tu stockes directement l’ID de la zone
 
-    @Column()
+    @Column( {type: 'uuid' })
     typelocalId: string;
 
     @Column('decimal' , {precision:12 , scale: 6 })

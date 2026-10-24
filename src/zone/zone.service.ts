@@ -1,7 +1,7 @@
 import {
   Injectable, NotFoundException, BadRequestException,
   ConflictException,
-  ServiceUnavailableException, Query,
+  ServiceUnavailableException, Query,Logger
 
 } from '@nestjs/common';
 import { InjectRepository, } from '@nestjs/typeorm';
@@ -16,107 +16,102 @@ import axios, { AxiosResponse } from 'axios';
 import { SocketService } from 'src/socket/socket.service';
 import * as _ from 'lodash';
 import { ConfigService } from '@nestjs/config';
+import { Market } from 'src/market/entities/market.entity';
 @Injectable()
 export class ZoneService {
   private gatewayBaseUrl: string;
+  private readonly logger = new Logger(ZoneService.name);
   constructor(
     @InjectRepository(Zone)
     private readonly zoneRepository: Repository<Zone>,
     private readonly httpService: HttpService,
+    @InjectRepository(Market)
+    private readonly marketRepository: Repository<Market>,
     private readonly socketService: SocketService,
     private readonly configService: ConfigService,
   ) {
     this.gatewayBaseUrl = this.configService.get<string>('GATEWAY_BASE_URL')!;
   }
-
-  async findOneById(zoneId: string): Promise<Zone | null> {
-    return this.zoneRepository.findOne({ where: { id_zone: zoneId } });
+    private geoJsonToWkt(geojson: {
+    type: 'Polygon';
+    coordinates: number[][][];
+  }): string {
+    const ring = geojson.coordinates[0];
+    const points = ring.map(([lng, lat]) => `${lng} ${lat}`).join(', ');
+    return `POLYGON((${points}))`;
   }
 
-  async existingFokontany(formattedId: string) {
-    if (!formattedId) {
-      throw new BadRequestException(`Fokontany Id manquant.`);
-    }
+  async create(createZoneDto: CreateZoneDto): Promise<Zone> {
+    // 1) Le market doit exister et être actif
+    const market = await this.marketRepository.findOne({
+      where: { id_market: createZoneDto.marketId },
+    });
 
-    try {
-      console.log(this.gatewayBaseUrl);
-
-      const response: AxiosResponse<any> = await firstValueFrom(
-        this.httpService.get(
-          `${this.gatewayBaseUrl}/serviceterritoire-v2/fokotanys/fokontanys/${formattedId}`,
-        ),
-      );
-
-      if (!response.data) {
-        throw new NotFoundException(
-          `Fokontany avec l'id '${formattedId}' n'existe pas`,
-        );
-      }
-
-      return response.data;
-    } catch (error: unknown) {
-      // Erreur provenant d'Axios
-      if (axios.isAxiosError(error)) {
-        const status = error.response?.status;
-
-        if (status === 404) {
-          throw new NotFoundException(
-            `Fokontany with id '${formattedId}' not found in gateway`,
-          );
-        }
-
-        if (status === 400) {
-          throw new BadRequestException(
-            `Invalid Fokontany ID '${formattedId}' provided`,
-          );
-        }
-      }
-
-      // Erreur générique : réseau, gateway indisponible, timeout...
-      throw new ServiceUnavailableException(
-        `Unable to reach the gateway service for fokontany validation`,
-      );
-    }
-  }
-
-  async create(createZoneDto: CreateZoneDto) {
-    // Vérifier que la fokontany existe dans le service externe
-    const fokontany = await this.existingFokontany(createZoneDto.formatted_id);
-
-    const municipalityId = createZoneDto.municipalityId;
-
-    if (!municipalityId) {
-      throw new BadRequestException(
-        `municipalityId est requis dans la requête`,
+    if (!market) {
+      throw new NotFoundException(
+        `Market with id '${createZoneDto.marketId}' not found`,
       );
     }
 
-
+    // 2) Doublon : nom déjà utilisé dans ce market
     const existingZone = await this.zoneRepository.findOne({
       where: {
         nom: createZoneDto.nom,
-        formatted_id: createZoneDto.formatted_id,
+        marketId: createZoneDto.marketId,
       },
     });
 
     if (existingZone) {
       throw new ConflictException(
-        `Zone '${createZoneDto.nom}' already exists in fokontany ${createZoneDto.formatted_id}`,
+        `Zone '${createZoneDto.nom}' already exists in market '${market.nom}'`,
       );
     }
 
-    // 🚨 Vérifier les intersections avec d’autres zones
+    // 3) La zone doit être entièrement DANS la délimitation du market
+    //    (si le market n'a pas de delimitation, on saute cette vérification)
+    if (market.delimitation) {
+      const isInside = await this.zoneRepository
+        .createQueryBuilder('z')
+        .select(
+          `ST_Within(
+             ST_GeomFromGeoJSON(:newPolygon)::geometry,
+             market.delimitation
+           )`,
+          'inside',
+        )
+        .from(Market, 'market')
+        .where('market.id_market = :marketId', {
+          marketId: createZoneDto.marketId,
+        })
+        .setParameter(
+          'newPolygon',
+          JSON.stringify(createZoneDto.delimitation),
+        )
+        .getRawOne<{ inside: boolean }>();
+
+      if (!isInside?.inside) {
+        throw new ConflictException(
+          `The new zone is not fully contained within the market '${market.nom}' delimitation`,
+        );
+      }
+    }
+
+    // 4) Pas d'intersection avec d'autres zones DU MÊME MARKET
     const intersection = await this.zoneRepository
       .createQueryBuilder('zone')
-      .where(
-        `ST_Intersects(
-        ST_GeomFromGeoJSON(:newPolygon)::geometry,
-        zone.delimitation
-      )`,
-      )
-      .setParameters({
-        newPolygon: JSON.stringify(createZoneDto.delimitation),
+      .where('zone.marketId = :marketId', {
+        marketId: createZoneDto.marketId,
       })
+      .andWhere(
+        `ST_Intersects(
+           ST_GeomFromGeoJSON(:newPolygon)::geometry,
+           zone.delimitation
+         )`,
+      )
+      .setParameter(
+        'newPolygon',
+        JSON.stringify(createZoneDto.delimitation),
+      )
       .getOne();
 
     if (intersection) {
@@ -125,33 +120,45 @@ export class ZoneService {
       );
     }
 
+    // 5) Création + sauvegarde
     try {
       let zone = this.zoneRepository.create({
-        ...createZoneDto,
-        municipalityId,
+        nom: createZoneDto.nom,
+        marketId: createZoneDto.marketId,
+        municipalityId: market.municipalityId, // ← récupéré du market
+        jours_actifs: createZoneDto.jours_actifs ?? null,
+        delimitation: this.geoJsonToWkt(createZoneDto.delimitation),
       });
 
-      // 2️⃣ Sauvegarde → l'ID est maintenant généré
       zone = await this.zoneRepository.save(zone);
-      console.log("heloooo");
-      // 3️⃣ Envoi de la notification avec la zone complète
-      const data = {
+
+      // 6) Notification socket
+      this.socketService.sendNotification({
         authorId: '550e8400-e29b-41d4-a716-446655440003',
         destinationId: null,
         typeNotification: 'broadcastToAll',
         message: 'zone_created',
-        ressource: zone
-      };
-
-      this.socketService.sendNotification(data);
+        ressource: zone,
+      });
 
       return zone;
     } catch (error: unknown) {
+      this.logger.error(
+        `Failed to create zone: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
       throw new BadRequestException(
-        `Failed to create zone. Please check your input data. ${error instanceof Error ? error.message : String(error)
+        `Failed to create zone. Please check your input data. ${
+          error instanceof Error ? error.message : String(error)
         }`,
       );
     }
+  }
+
+
+  async findOneById(zoneId: string): Promise<Zone | null> {
+    return this.zoneRepository.findOne({ where: { id_zone: zoneId } });
   }
 
 
@@ -209,7 +216,6 @@ export class ZoneService {
         nom: zone.nom,
         status: zone.status,
         geo_delimitation: zone.delimitation,
-        formatted_Id: zone.formatted_id,
         municipalityId: zone.municipalityId,
         total_locaux: zone.locaux.length,
         locaux_disponibles: zone.locaux.filter(local => local.statut === 'DISPONIBLE').length

@@ -1,4 +1,4 @@
-import { Controller, Get, Post, Body, Patch, Delete, Param, Query, ParseIntPipe, DefaultValuePipe } from '@nestjs/common';
+import { Controller,HttpCode,HttpStatus, Get, Post, Body, Patch, Delete, Param, Query, ParseIntPipe, DefaultValuePipe } from '@nestjs/common';
 import { ZoneService } from './zone.service';
 import { CreateZoneDto } from './dto/create-zone.dto';
 import { UpdateZoneDto } from './dto/update-zone.dto';
@@ -11,13 +11,20 @@ export class ZoneController {
   constructor(private readonly zoneService: ZoneService) { }
 
   @Post()
-  @ApiOperation({ summary: 'Créer une zone dans une commune' })
-  create(
-    @Body() createZoneDto: CreateZoneDto
-  ) {
-    return this.zoneService.create(createZoneDto);
+  @HttpCode(HttpStatus.CREATED)
+  @ApiOperation({ summary: 'Créer une nouvelle zone dans un market' })
+  @ApiResponse({ status: 201, description: 'Zone créée avec succès' })
+  @ApiResponse({ status: 400, description: 'Market inactif' })
+  @ApiResponse({ status: 404, description: 'Market introuvable' })
+  @ApiResponse({
+    status: 409,
+    description: 'Doublon, intersection ou zone hors du market',
+  })
+  async create(@Body() dto: CreateZoneDto) {
+    return this.zoneService.create(dto);
   }
 
+ 
 
   @Get(':municipalityId')
   @ApiOperation({ summary: 'Récupérer toutes les zones d’une commune avec filtres' })

@@ -1,4 +1,4 @@
-import { Injectable, NotFoundException, BadRequestException, Logger, ForbiddenException } from '@nestjs/common';
+import { Injectable, NotFoundException, ServiceUnavailableException, BadRequestException, Logger, ForbiddenException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, Between, LessThanOrEqual, MoreThanOrEqual, LessThan, MoreThan } from 'typeorm';
 import { Location } from './entities/location.entity';
@@ -14,10 +14,9 @@ import axios from 'axios';
 import { DistributionZone } from 'src/distribution_zone/entities/distribution_zone.entity';
 import { WritableStreamBuffer } from 'stream-buffers';
 import { HttpService } from '@nestjs/axios';
-import { lastValueFrom } from 'rxjs';
+import { firstValueFrom, lastValueFrom } from 'rxjs';
 import * as PDFDocument from 'pdfkit';
 import { LocalService } from 'src/local/local.service';
-import { firstValueFrom } from 'rxjs';
 import { SocketService } from 'src/socket/socket.service';
 import { ConfigService } from '@nestjs/config';
 @Injectable()
@@ -144,11 +143,16 @@ export class LocationService {
     }
   }
 
-  async findAll(municipalityId: string, page: number = 1, limit: number = 10): Promise<{ data: Location[], total: number }> {
+  async findAll(
+    municipalityId: string,
+    page = 1,
+    limit = 10,
+  ): Promise<{ data: Location[]; total: number }> {
     const query = this.locationRepository
       .createQueryBuilder('location')
       .leftJoinAndSelect('location.local', 'local')
       .leftJoinAndSelect('local.zone', 'zone')
+      .leftJoinAndSelect('zone.market', 'market')     // ✅ market ajouté
       .where('zone.municipalityId = :municipalityId', { municipalityId });
 
     const [result, total] = await query
@@ -161,9 +165,9 @@ export class LocationService {
   }
 
   async create(createLocationDto: CreateLocationDto): Promise<Location> {
-    let { date_debut_loc, periodicite, localId, id_user, nif } = createLocationDto;
-    let date_fin_loc: Date;
+    const { date_debut_loc, localId, id_user, nif } = createLocationDto;
 
+    // ── 1) Le local doit exister ──
     const local = await this.localRepository.findOne({
       where: { id_local: localId },
       relations: ['typelocal'],
@@ -173,127 +177,131 @@ export class LocationService {
       throw new NotFoundException(`Local with id ${localId} not found`);
     }
 
-    const countCurrentLocationUser = await this.countCurrentLocationsByUser(id_user);
-    if (countCurrentLocationUser > 2) {
-      throw new BadRequestException(`L'utilisateur avec l'ID ${id_user} a déjà 3 locations en cours.`);
+    // ── 2) Le local doit être DISPONIBLE ──
+    if (local.statut !== 'DISPONIBLE') {
+      throw new BadRequestException(
+        `Le local ${localId} n'est pas disponible (statut actuel : ${local.statut}).`,
+      );
     }
 
+    // ── 3) Le Typelocal doit autoriser une location mensuelle (ANNUEL) ──
+    const typeContrat = local.typelocal?.type_contrat;
+    if (!typeContrat) {
+      throw new BadRequestException(
+        `Le type de contrat du local ${localId} est introuvable.`,
+      );
+    }
+    if (typeContrat !== 'ANNUEL') {
+      throw new BadRequestException(
+        `Le local ${localId} est de type contrat JOURNALIER. ` +
+        `Ce service ne gère que les locations mensuelles.`,
+      );
+    }
+
+    // ── 4) Limite de locations actives par user ──
+    const countCurrentLocationUser =
+      await this.countCurrentLocationsByUser(id_user);
+    if (countCurrentLocationUser >= 3) {
+      throw new BadRequestException(
+        `L'utilisateur avec l'ID ${id_user} a déjà 3 locations en cours.`,
+      );
+    }
+
+    // ── 5) Dates ──
     const debut = new Date(date_debut_loc);
     debut.setHours(0, 0, 0, 0);
 
-    const typeContrat = local.typelocal?.type_contrat;
+    const date_fin_loc = createLocationDto.date_fin_loc
+      ? new Date(createLocationDto.date_fin_loc)
+      : (() => {
+        const d = new Date(debut);
+        d.setFullYear(d.getFullYear() + 1);
+        return d;
+      })();
+    date_fin_loc.setHours(23, 59, 59, 999);
 
-    if (!typeContrat) {
-      throw new BadRequestException(`Le type de contrat du local ${localId} est introuvable.`);
-    }
-    if (periodicite === Periodicite.JOURNALIER && typeContrat === 'ANNUEL') {
-      // ❌ Interdit : MENSUEL → JOURNALIER
+    if (debut >= date_fin_loc) {
       throw new BadRequestException(
-        `Le local ${localId} est de type contrat MENSUEL. Impossible de le louer en JOURNALIER.`,
+        'La date de début doit être avant la date de fin.',
       );
     }
-    // Calcul de la date de fin
-    if (periodicite === Periodicite.MENSUEL) {
-      date_fin_loc = new Date(debut);
-      date_fin_loc.setFullYear(date_fin_loc.getFullYear() + 1);
-      date_fin_loc.setHours(0, 0, 0, 0); // Normalisation pour les locations mensuelles
-    } else if (periodicite === Periodicite.JOURNALIER) {
-      date_fin_loc = new Date(debut);
-      date_fin_loc.setHours(23, 59, 59, 999);
-    } else {
-      date_fin_loc = createLocationDto.date_fin_loc
-        ? new Date(createLocationDto.date_fin_loc)
-        : new Date(debut);
-      date_fin_loc.setHours(0, 0, 0, 0); // Normalisation pour les locations autres
+
+    // ── 6) Validation mensuelle : au moins 1 mois d'écart ──
+    const diffMonths =
+      (date_fin_loc.getFullYear() - debut.getFullYear()) * 12 +
+      (date_fin_loc.getMonth() - debut.getMonth());
+
+    if (diffMonths < 1) {
+      throw new BadRequestException(
+        "Pour une location mensuelle, l'écart doit être d'au moins un mois.",
+      );
     }
 
-    const fin = new Date(date_fin_loc);
-
-    if (debut >= fin) {
-      throw new BadRequestException("La date de début doit être avant la date de fin.");
-    }
-
-    // Vérifier s'il y a un chevauchement avec une location existante
-    const existingLocation = await this.locationRepository.createQueryBuilder('location')
+    // ── 7) Chevauchement avec une location existante ──
+    const existingLocation = await this.locationRepository
+      .createQueryBuilder('location')
       .where('location.localId = :localId', { localId })
-      .andWhere('location.date_debut_loc < :newFin', { newFin: fin })
+      .andWhere('location.date_debut_loc < :newFin', { newFin: date_fin_loc })
       .andWhere('location.date_fin_loc > :newDebut', { newDebut: debut })
       .getOne();
 
     if (existingLocation) {
-      throw new BadRequestException(`Le local ${localId} est déjà loué pour la période demandée.`);
+      throw new BadRequestException(
+        `Le local ${localId} est déjà loué pour la période demandée.`,
+      );
     }
 
-    // Validation mensuelle
-    if (periodicite === Periodicite.MENSUEL) {
-      const diffMonths =
-        (fin.getFullYear() - debut.getFullYear()) * 12 +
-        (fin.getMonth() - debut.getMonth());
-      if (diffMonths < 1) {
-        throw new BadRequestException(
-          "Pour une location mensuelle, l'écart doit être d'au moins un mois."
-        );
-      }
-    }
+    // ── 8) Fréquence (nb de mois) ──
+    const frequence =
+      date_fin_loc.getDate() === debut.getDate() && diffMonths > 0
+        ? diffMonths
+        : date_fin_loc.getDate() >= debut.getDate()
+          ? diffMonths + 1
+          : diffMonths;
 
-    // Calcul de la fréquence
-    let frequence = 0;
-    if (periodicite === Periodicite.JOURNALIER) {
-      frequence = Math.ceil((fin.getTime() - debut.getTime()) / (1000 * 60 * 60 * 24));
-    } else if (periodicite === Periodicite.MENSUEL) {
-      const diffMonths =
-        (fin.getFullYear() - debut.getFullYear()) * 12 +
-        (fin.getMonth() - debut.getMonth());
-
-      if (fin.getDate() === debut.getDate() && diffMonths > 0) {
-        frequence = diffMonths;
-      } else {
-        frequence = fin.getDate() >= debut.getDate() ? diffMonths + 1 : diffMonths;
-      }
-    }
-
-    // Création de la location
+    // ── 9) Création ──
     const location = this.locationRepository.create({
-      ...createLocationDto,
-      date_fin_loc: fin, // Utilisation de la date de fin calculée et normalisée
+      periodicite: Periodicite.MENSUEL,      // forcé : ce service ne gère que le mensuel
+      id_user,
+      nif,
+      date_debut_loc: debut,
+      date_fin_loc,
+      localId,
       frequence,
+      usage: createLocationDto.usage,
     });
 
     const savedLocation = await this.locationRepository.save(location);
 
-    // Maintenant l’ID existe
-    const notifData = {
-      id_location: savedLocation.id_location,
-      localId: savedLocation.localId,
-    };
+    // ── 10) Mettre à jour le statut du local ──
+    local.statut = 'LOUE';
+    await this.localRepository.save(local);
 
-    console.log(notifData);
-
-    // Broadcast + Notification
+    // ── 11) Notifications ──
     await this.notificationService.createLocationNotification(
       savedLocation.id_user,
-      "CONFIRMED",
-      notifData
+      'CONFIRMED',
+      {
+        id_location: savedLocation.id_location,
+        localId: savedLocation.localId,
+      },
     );
-    // 3️⃣ Envoi de la notification avec la zone complète
-    const data = {
+
+    this.socketService.sendNotification({
       authorId: '550e8400-e29b-41d4-a716-446655440003',
       destinationId: null,
       typeNotification: 'broadcastToAll',
       message: 'location_created',
-      ressource: savedLocation
-    };
+      ressource: savedLocation,
+    });
 
-
-    const data1 = {
+    this.socketService.sendNotification({
       authorId: '550e8400-e29b-41d4-a716-446655440003',
       destinationId: savedLocation.id_user,
       typeNotification: 'sendToUser',
       message: 'votre_location_created',
-      ressource: savedLocation
-    };
-    this.socketService.sendNotification(data);
-    this.socketService.sendNotification(data1);
+      ressource: savedLocation,
+    });
 
     return savedLocation;
   }
@@ -320,133 +328,176 @@ export class LocationService {
     await this.localRepository.save(local);
   }
 
-  async findAllInProgress(municipalityId: string): Promise<Location[]> {
+  async findAllInProgress(
+    municipalityId: string,
+    page = 1,
+    limit = 50,
+  ): Promise<{ data: Location[]; total: number }> {
+    // Normaliser à minuit pour comparer avec des colonnes DATE
     const today = new Date();
+    today.setHours(0, 0, 0, 0);
 
-    return await this.locationRepository
+    const query = this.locationRepository
       .createQueryBuilder('location')
       .leftJoinAndSelect('location.local', 'local')
       .leftJoinAndSelect('local.zone', 'zone')
+      .leftJoinAndSelect('zone.market', 'market')
       .where('location.date_debut_loc <= :today', { today })
       .andWhere('location.date_fin_loc >= :today', { today })
-      .andWhere('zone.municipalityId = :municipalityId', { municipalityId })
-      .getMany();
+      .andWhere('market.municipalityId = :municipalityId', { municipalityId });
+
+    const [data, total] = await query
+      .orderBy('location.date_debut_loc', 'DESC')
+      .skip((page - 1) * limit)
+      .take(limit)
+      .getManyAndCount();
+
+    return { data, total };
   }
 
-  async findByUser(id_user: string, page?: number, limit?: number): Promise<any> {
-    const query = this.locationRepository.createQueryBuilder('location')
+  async findByUser(
+    id_user: string,
+    page?: number,
+    limit?: number,
+  ): Promise<
+    | Location[]
+    | { data: Location[]; total: number; currentPage: number; totalPages: number }
+  > {
+    const query = this.locationRepository
+      .createQueryBuilder('location')
       .leftJoinAndSelect('location.local', 'local')
-      .leftJoinAndSelect('location.paiement_locations', 'paiement_locations')
+      .leftJoinAndSelect('local.zone', 'zone')
+      .leftJoinAndSelect('zone.market', 'market')
       .where('location.id_user = :id_user', { id_user })
-      .orderBy('location.date_debut_loc', 'DESC');
+      .orderBy('location.date_debut_loc', 'DESC')
+      .addOrderBy('location.id_location', 'DESC');
 
-    // 🔹 Si pagination demandée
-    if (page && limit) {
-      const [result, total] = await query
+    // Pagination si explicitement demandée
+    if (page !== undefined && limit !== undefined && limit > 0) {
+      const [data, total] = await query
         .skip((page - 1) * limit)
         .take(limit)
         .getManyAndCount();
 
       return {
-        data: result,
+        data,
         total,
         currentPage: page,
         totalPages: Math.ceil(total / limit),
       };
     }
 
-    // 🔹 Sinon, retourner toutes les locations
-    return await query.getMany();
+    return query.getMany();
   }
-
 
 
   async findInProgressByUser(id_user: string): Promise<Location[]> {
     const today = new Date();
-    return await this.locationRepository.find({
+    today.setHours(0, 0, 0, 0);
+
+    return this.locationRepository.find({
       where: {
         id_user,
-        date_debut_loc: MoreThan(today), // 👉 date début supérieure à aujourd’hui
-      },
-      relations: ['local', 'paiement_locations'],
-    });
-  }
-
-
-  async findInProgressByUserByControlleur(
-    id_user: string,
-    id_controleur: string
-  ): Promise<any> {
-    const today = new Date();
-    let userNom;
-    // Récupérer les locations en cours
-    const locations = await this.locationRepository.find({
-      where: {
-        id_user: id_user,
         date_debut_loc: LessThanOrEqual(today),
         date_fin_loc: MoreThanOrEqual(today),
       },
-      relations: ['local', 'local.zone', 'local.typelocal'],
+      relations: ['local', 'local.zone', 'local.typelocal', 'paiement_locations'],
+      order: { date_debut_loc: 'DESC' },
     });
+  }
 
+  async findInProgressByUserByControlleur(
+    id_user: string,
+    id_controleur: string,
+  ): Promise<{
+    userNom: string | null;
+    total: number;
+    locations: Location[];
+  }> {
+    // ── 1) Récupérer le contribuable via la gateway ──
+    let userNom: string | null = null;
     try {
       const response = await firstValueFrom(
-        this.httpService.get(`${this.gatewayBaseUrl}/serviceauth/users/${id_user}`)
+        this.httpService.get(
+          `${this.gatewayBaseUrl}/serviceauth/users/${id_user}`,
+        ),
       );
 
       const userData = response.data;
-      userNom = userData.user_pseudo;
-
-      if (!userData || !userData.appUserRoles) {
+      if (!userData) {
         throw new NotFoundException(`Utilisateur ${id_user} introuvable.`);
       }
-
+      userNom = userData.user_pseudo ?? null;
     } catch (error: any) {
-      // Gestion spécifique pour AxiosError
+      // Ne pas masquer nos propres exceptions
+      if (error instanceof NotFoundException) throw error;
+
       if (error.response?.status === 404) {
         throw new NotFoundException(`Utilisateur ${id_user} introuvable.`);
       }
       if (error.response?.status === 403) {
-        throw new ForbiddenException(`Accès refusé pour l’utilisateur ${id_user}.`);
+        throw new ForbiddenException(
+          `Le contrôleur ${id_controleur} n'a pas accès aux données de l'utilisateur ${id_user}.`,
+        );
       }
-      console.error('Erreur HTTP lors de la vérification du rôle:', error.response?.data || error.message);
-      throw new BadRequestException(`Erreur lors de la vérification du rôle: ${error.message || error}`);
+      this.logger.error(
+        `Gateway error for user ${id_user}: ${error.message}`,
+      );
+      throw new ServiceUnavailableException(
+        `Impossible de vérifier l'utilisateur via la gateway.`,
+      );
     }
-    // Récupérer les distribution zones affectées au contrôleur
+
+    // ── 2) Zones affectées au contrôleur ──
     const distributionZones = await this.distributionZoneRepository.find({
       where: { id_user: id_controleur },
       relations: ['zone'],
     });
 
-    console.log("location", locations.length)
-    // 🔥 CORRECTION : Vérifier si locations est vide ou null
-    if (!locations || locations.length == 0) {
-      // 🚨 Aucun location trouvé → priorité URGENT
-      const histData = {
-        resultat: 'Aucune location trouvée',
-        id_contribuable: id_user,
-        nom_contribuable: userNom,
+    const zoneIds = distributionZones.map((dz) => dz.zone.id_zone);
 
-
-      };
-
-
-      return [];
+    // Le contrôleur n'a aucune zone → il ne peut rien voir
+    if (zoneIds.length === 0) {
+      return { userNom, total: 0, locations: [] };
     }
 
-    return locations;
+    // ── 3) Locations en cours du contribuable, dans les zones du contrôleur ──
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+
+    const locations = await this.locationRepository
+      .createQueryBuilder('location')
+      .leftJoinAndSelect('location.local', 'local')
+      .leftJoinAndSelect('local.zone', 'zone')
+      .leftJoinAndSelect('local.typelocal', 'typelocal')
+      .leftJoinAndSelect('zone.market', 'market')
+      .where('location.id_user = :id_user', { id_user })
+      .andWhere('location.date_debut_loc <= :today', { today })
+      .andWhere('location.date_fin_loc >= :today', { today })
+      .andWhere('local.zoneId IN (:...zoneIds)', { zoneIds })
+      .orderBy('location.date_debut_loc', 'DESC')
+      .getMany();
+
+    return {
+      userNom,
+      total: locations.length,
+      locations,
+    };
   }
 
-  async findOne(id: string, municipalityId?: string | null | undefined): Promise<Location> {
+  async findOne(id: string, municipalityId?: string | null): Promise<Location> {
     const query = this.locationRepository
       .createQueryBuilder('location')
       .leftJoinAndSelect('location.local', 'local')
       .leftJoinAndSelect('local.typelocal', 'typelocal')
       .leftJoinAndSelect('local.zone', 'zone')
+      .leftJoinAndSelect('zone.market', 'market')
       .where('location.id_location = :id', { id });
 
-    if (municipalityId !== undefined && municipalityId !== null) {
-      query.andWhere('zone.municipalityId = :municipalityId', { municipalityId });
+    if (municipalityId) {
+      query.andWhere('market.municipalityId = :municipalityId', {
+        municipalityId,
+      });
     }
 
     const location = await query.getOne();
@@ -458,140 +509,233 @@ export class LocationService {
     return location;
   }
 
-  async findLocationWithPaymentDates(municipalityId: string, id_location: string): Promise<any> {
-    try {
-      console.log(`Recherche location ID: ${id_location}, Municipality: ${municipalityId}`);
+  async findLocationWithPaymentDates(
+    municipalityId: string,
+    id_location: string,
+  ): Promise<{
+    id_location: string;
+    periodicite: Periodicite;
+    date_debut_loc: Date;
+    date_fin_loc: Date;
+    frequence: number;
+    tarif: number;
+    derniere_date_payer: Date | null;
+    local_id: string;
+    zone_id: string;
+    zone_nom: string;
+    market_id: string;
+    market_nom: string;
+    id_user: string;
+    nif: string;
+    statut: 'À_VENIR' | 'ACTIF' | 'EXPIRÉ';
+  }> {
+    const location = await this.locationRepository
+      .createQueryBuilder('location')
+      .leftJoinAndSelect('location.paiement_locations', 'paiement_locations')
+      .leftJoinAndSelect('location.local', 'local')
+      .leftJoinAndSelect('local.typelocal', 'typelocal')
+      .leftJoinAndSelect('local.zone', 'zone')
+      .leftJoinAndSelect('zone.market', 'market')
+      .where('location.id_location = :id', { id: id_location })
+      .andWhere('market.municipalityId = :municipalityId', { municipalityId })
+      .orderBy('paiement_locations.date_fin', 'DESC')
+      .getOne();
 
-      const location = await this.locationRepository
-        .createQueryBuilder('location')
-        .leftJoinAndSelect('location.paiement_locations', 'paiement_locations')
-        .leftJoinAndSelect('location.local', 'local')
-        .leftJoinAndSelect('local.typelocal', 'typelocal')
-        .leftJoinAndSelect('local.zone', 'zone')
-        .where('location.id_location = :id', { id: id_location })
-        .andWhere('zone.municipalityId = :municipalityId', { municipalityId })
-        .orderBy('paiement_locations.date_fin', 'DESC')
-        .getOne();
+    if (!location) {
+      throw new NotFoundException(
+        `Location avec l'ID "${id_location}" non trouvée dans la municipalité "${municipalityId}".`,
+      );
+    }
 
-      if (!location) {
-        console.log(`Aucune location trouvée pour ID: ${id_location}, Municipality: ${municipalityId}`);
-        throw new NotFoundException(`Location avec l'ID "${id_location}" non trouvée dans la municipalité "${municipalityId}".`);
-      }
-
-      console.log('Location trouvée:', {
-        id: location.id_location,
-        localId: location.local?.id_local,
-        zoneId: location.local?.zone?.id_zone,
-        municipalityId: location.local?.zone?.municipalityId
-      });
-
-      const lastPaymentDate = location.paiement_locations && location.paiement_locations.length > 0
+    const lastPayment =
+      location.paiement_locations && location.paiement_locations.length > 0
         ? location.paiement_locations[0].date_fin
         : null;
 
-      const tarif = location.local?.typelocal?.tarif;
-      if (tarif === undefined || tarif === null) {
-        console.warn(`Tarif manquant pour la location ${id_location}`);
-      }
-
-      const result = {
-        id_location: location.id_location,
-        periodicite: location.periodicite,
-        date_debut_loc: location.date_debut_loc,
-        date_fin_loc: location.date_fin_loc,
-        frequence: location.frequence,
-        tarif: tarif || 0,
-        derniere_date_payer: lastPaymentDate,
-        local_id: location.local?.id_local,
-        zone_id: location.local?.zone?.id_zone,
-        zone_nom: location.local?.zone?.nom,
-        id_user: location.id_user,
-        nif: location.nif,
-        statut: new Date() <= new Date(location.date_fin_loc) ? 'ACTIF' : 'EXPIRÉ'
-      };
-
-      console.log('Données retournées:', result);
-      return result;
-
-    } catch (error) {
-      console.error('Erreur dans findLocationWithPaymentDates:', error);
-
-      if (error instanceof NotFoundException) {
-        throw error;
-      }
-
-      throw new BadRequestException(`Erreur lors de la récupération de la location: ${error.message}`);
+    const tarif = location.local?.typelocal?.tarif;
+    if (tarif === undefined || tarif === null) {
+      this.logger.warn(`Tarif manquant pour la location ${id_location}`);
     }
+
+    // Statut complet : avant / pendant / après
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const debut = new Date(location.date_debut_loc);
+    const fin = new Date(location.date_fin_loc);
+    debut.setHours(0, 0, 0, 0);
+    fin.setHours(23, 59, 59, 999);
+
+    let statut: 'À_VENIR' | 'ACTIF' | 'EXPIRÉ';
+    if (today > fin) {
+      statut = 'EXPIRÉ';
+    } else if (today < debut) {
+      statut = 'À_VENIR';
+    } else {
+      statut = 'ACTIF';
+    }
+
+    return {
+      id_location: location.id_location,
+      periodicite: location.periodicite,
+      date_debut_loc: location.date_debut_loc,
+      date_fin_loc: location.date_fin_loc,
+      frequence: location.frequence,
+      tarif: tarif ?? 0,
+      derniere_date_payer: lastPayment,
+      local_id: location.local?.id_local ?? '',
+      zone_id: location.local?.zone?.id_zone ?? '',
+      zone_nom: location.local?.zone?.nom ?? '',
+      market_id: location.local?.zone?.market?.id_market ?? '',
+      market_nom: location.local?.zone?.market?.nom ?? '',
+      id_user: location.id_user,
+      nif: location.nif,
+      statut,
+    };
   }
 
-  async getRemainingAmount(id_location: string): Promise<{ Montant_total: number; total_payer: number; Reste_a_payer: number }> {
+  async getRemainingAmount(id_location: string): Promise<{
+    Montant_total: number;
+    total_payer: number;
+    Reste_a_payer: number;
+  }> {
     const location = await this.locationRepository.findOne({
       where: { id_location },
       relations: ['local', 'local.typelocal'],
     });
 
     if (!location) {
-      throw new NotFoundException(`Location with ID "${id_location}" not found.`);
+      throw new NotFoundException(
+        `Location with ID "${id_location}" not found.`,
+      );
     }
 
     if (!location.local || !location.local.typelocal) {
-      throw new NotFoundException(`Local or TypeLocal not found for location ID "${id_location}".`);
+      throw new NotFoundException(
+        `Local or TypeLocal not found for location ID "${id_location}".`,
+      );
     }
 
-    const { periodicite, frequence } = location;
-    const tarif = location.local.typelocal.tarif;
+    // ✅ Cast explicite — decimal Postgres = string
+    const tarif = Number(location.local.typelocal.tarif);
+    const frequence_restante = Number(location.frequence);
 
-    // Récupérer le montant total déjà payé pour cette location.
-    const total_payer = await this.paiementLocationService.getTotalPaidAmount(id_location);
+    if (!Number.isFinite(tarif) || tarif < 0) {
+      throw new BadRequestException(
+        `Tarif invalide pour la location ${id_location} (tarif=${location.local.typelocal.tarif}).`,
+      );
+    }
 
-    // Calculer le coût total de tout le contrat en additionnant le montant payé et le montant restant à payer.
-    let Montant_total = total_payer + (tarif * frequence);
+    if (!Number.isFinite(frequence_restante) || frequence_restante < 0) {
+      throw new BadRequestException(
+        `Fréquence invalide pour la location ${id_location} (frequence=${location.frequence}).`,
+      );
+    }
 
-    // Calculer le montant restant à payer.
-    const Reste_a_payer = Montant_total - total_payer;
+    const total_payer_raw =
+      await this.paiementLocationService.getTotalPaidAmount(id_location);
+
+    const total_payer = Number(total_payer_raw ?? 0);
+
+    if (!Number.isFinite(total_payer) || total_payer < 0) {
+      throw new BadRequestException(
+        `Montant payé invalide pour la location ${id_location} (total_payer=${total_payer_raw}).`,
+      );
+    }
+
+    // Reste à payer = mois restants × tarif mensuel
+    const Reste_a_payer = Math.max(0, tarif * frequence_restante);
+
+    // Montant total engagé = déjà payé + reste
+    const Montant_total = total_payer + Reste_a_payer;
 
     return {
       Montant_total,
       total_payer,
-      Reste_a_payer: Math.max(0, Reste_a_payer) // Utiliser Math.max pour éviter les valeurs négatives
+      Reste_a_payer,
     };
   }
 
-  async getPaymentSchedule(id_location: string): Promise<any[]> {
+  async getPaymentSchedule(id_location: string): Promise<
+    Array<{
+      dueDate: string;
+      amount: number;
+      status: 'PAID' | 'OVERDUE' | 'DUE';
+    }>
+  > {
     const location = await this.locationRepository.findOne({
       where: { id_location },
       relations: ['local', 'local.typelocal'],
     });
 
-    if (!location || location.periodicite !== 'MENSUEL') {
-      throw new BadRequestException('Payment schedule is only available for monthly locations.');
+    if (!location) {
+      throw new NotFoundException(
+        `Location with ID "${id_location}" not found.`,
+      );
     }
 
-    const tarif = location.local.typelocal.tarif;
+    if (location.periodicite !== 'MENSUEL') {
+      throw new BadRequestException(
+        'Payment schedule is only available for monthly locations.',
+      );
+    }
+
+    if (!location.local?.typelocal) {
+      throw new NotFoundException(
+        `TypeLocal not found for location ID "${id_location}".`,
+      );
+    }
+
+    const tarif = Number(location.local.typelocal.tarif);
+
     const paidPeriods = await this.paiementLocationRepository.find({
       where: { locationId: id_location },
       order: { date_fin: 'ASC' },
     });
 
-    // Déclarez explicitement le type du tableau pour éviter les erreurs de typage
-    const schedule: any[] = [];
-    let currentDate = new Date(location.date_debut_loc);
-    let paidUntilDate = new Date(location.date_debut_loc);
+    const paidUntilDate =
+      paidPeriods.length > 0
+        ? new Date(paidPeriods[paidPeriods.length - 1].date_fin)
+        : null;
 
-    if (paidPeriods.length > 0) {
-      paidUntilDate = new Date(paidPeriods[paidPeriods.length - 1].date_fin);
-    }
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+
+    const schedule: Array<{
+      dueDate: string;
+      amount: number;
+      status: 'PAID' | 'OVERDUE' | 'DUE';
+    }> = [];
+
+    const debut = new Date(location.date_debut_loc);
 
     for (let i = 0; i < location.frequence; i++) {
-      const paymentDate = new Date(location.date_debut_loc);
-      paymentDate.setMonth(paymentDate.getMonth() + i);
+      // ✅ Calcul du mois SANS bug de fin de mois
+      const paymentDate = new Date(
+        debut.getFullYear(),
+        debut.getMonth() + i,
+        debut.getDate(),
+      );
 
-      const isPaid = paidUntilDate >= paymentDate;
+      const isPaid = paidUntilDate !== null && paidUntilDate >= paymentDate;
+
+      let status: 'PAID' | 'OVERDUE' | 'DUE';
+      if (isPaid) {
+        status = 'PAID';
+      } else if (paymentDate < today) {
+        status = 'OVERDUE';
+      } else {
+        status = 'DUE';
+      }
+
+      // ✅ Format date locale (pas UTC)
+      const yyyy = paymentDate.getFullYear();
+      const mm = String(paymentDate.getMonth() + 1).padStart(2, '0');
+      const dd = String(paymentDate.getDate()).padStart(2, '0');
 
       schedule.push({
-        dueDate: paymentDate.toISOString().split('T')[0],
+        dueDate: `${yyyy}-${mm}-${dd}`,
         amount: tarif,
-        status: isPaid ? 'PAID' : (paymentDate < new Date() ? 'OVERDUE' : 'DUE'),
+        status,
       });
     }
 
@@ -603,6 +747,20 @@ export class LocationService {
     Object.assign(location, updateDto);
     return await this.locationRepository.save(location);
   }
+
+  //   async update(
+  //   municipalityId: string,
+  //   id: string,
+  //   updateDto: UpdateLocationDto,
+  // ): Promise<Location> {
+  //   const location = await this.findOne(id, municipalityId);
+
+  //   // Seuls champs autorisés à changer
+  //   if (updateDto.nif !== undefined) location.nif = updateDto.nif;
+  //   if (updateDto.usage !== undefined) location.usage = updateDto.usage;
+
+  //   return this.locationRepository.save(location);
+  // }
 
   async remove(id: string): Promise<void> {
     const location = await this.locationRepository.findOne({
@@ -840,15 +998,26 @@ export class LocationService {
       );
       const userData = response.data;
       userNom = userData?.user_pseudo || 'Inconnu';
-    } catch (error: any) {
-      if (error.response?.status === 404) {
-        throw new NotFoundException(`Utilisateur ${id_user} introuvable.`);
+    } catch (error: unknown) {
+      if (axios.isAxiosError(error)) {
+        const status = error.response?.status;
+        if (status === 404) {
+          throw new NotFoundException(`Utilisateur ${id_user} introuvable.`);
+        }
+        if (status === 403) {
+          throw new ForbiddenException(
+            `Accès refusé pour l’utilisateur ${id_user}.`,
+          );
+        }
+        this.logger.error(
+          `Gateway error for user ${id_user}: ${error.message}`,
+        );
+      } else if (error instanceof Error) {
+        this.logger.error(`Unexpected error: ${error.message}`);
       }
-      if (error.response?.status === 403) {
-        throw new ForbiddenException(`Accès refusé pour l’utilisateur ${id_user}.`);
-      }
-      console.error('Erreur HTTP lors de la vérification du rôle:', error.response?.data || error.message);
-      throw new BadRequestException(`Erreur lors de la vérification du rôle: ${error.message || error}`);
+      throw new ServiceUnavailableException(
+        `Erreur lors de la vérification de l'utilisateur ${id_user}.`,
+      );
     }
 
     // 🔹 Vérification si une location est en cours
@@ -926,9 +1095,8 @@ export class LocationService {
   async generateContratBail(locationId: string): Promise<Buffer> {
     const location = await this.locationRepository.findOne({
       where: { id_location: locationId },
-      relations: ['local', 'local.zone', 'local.typelocal'],
+      relations: ['local', 'local.zone', 'local.zone.market', 'local.typelocal'],
     });
-
     if (!location) {
       throw new NotFoundException(`Location ${locationId} introuvable`);
     }
@@ -958,25 +1126,38 @@ export class LocationService {
 
       citizenData = citizen.data
 
-    } catch (error: any) {
-      if (error.response?.status === 404) {
-        throw new NotFoundException(`Utilisateur ${location.id_user} introuvable.`);
+    } catch (error: unknown) {
+      if (axios.isAxiosError(error)) {
+        const status = error.response?.status;
+        if (status === 404) {
+          throw new NotFoundException(
+            `Utilisateur ${location.id_user} introuvable.`,
+          );
+        }
+        if (status === 403) {
+          throw new ForbiddenException(
+            `Accès refusé pour l’utilisateur ${location.id_user}.`,
+          );
+        }
+        this.logger.error(
+          `Gateway error for user ${location.id_user}: ${error.message}`,
+        );
       }
-      if (error.response?.status === 403) {
-        throw new ForbiddenException(`Accès refusé pour l’utilisateur ${location.id_user}.`);
-      }
-      console.error('Erreur HTTP lors de la vérification du rôle:', error.response?.data || error.message);
-      throw new BadRequestException(`Erreur lors de la vérification du rôle: ${error.message || error}`);
+      throw new ServiceUnavailableException(
+        `Erreur lors de la récupération des données utilisateur.`,
+      );
     }
-
 
     // 🔹 Tenter de récupérer la commune, mais ignorer si erreur
     try {
       const url = `${this.gatewayBaseUrl}/serviceterritoire-v2/communes/noForm//${municipalityId}`;
       const response = await lastValueFrom(this.httpService.get(url));
       commune = response.data;
-    } catch (error) {
-      console.error("⚠️ Impossible d'obtenir les données de la commune :", error.message);
+    } catch (error: unknown) {
+      const msg = error instanceof Error ? error.message : String(error);
+      this.logger.warn(
+        `⚠️ Impossible d'obtenir les données de la commune : ${msg}`,
+      );
       // On continue avec des données par défaut
     }
 
@@ -1171,7 +1352,7 @@ export class LocationService {
       citizenData = citizen.data;
 
       const foko = await firstValueFrom(
-        this.httpService.get(`${this.gatewayBaseUrl}/serviceterritoire-v2/fokotanys/fokontanys/${location.local.zone.formatted_id}`),
+        this.httpService.get(`${this.gatewayBaseUrl}/serviceterritoire-v2/fokotanys/fokontanys/${location.local.zone.market?.formatted_id ?? '-'}`),
       );
 
       fokontany = foko.data
@@ -1193,8 +1374,11 @@ export class LocationService {
       const url = `${this.gatewayBaseUrl}/serviceterritoire-v2/communes/noForm//${municipalityId}`;
       const response = await lastValueFrom(this.httpService.get(url));
       commune = response.data;
-    } catch (error) {
-      console.error("⚠️ Impossible d'obtenir les données de la commune :", error.message);
+    } catch (error: unknown) {
+      const msg = error instanceof Error ? error.message : String(error);
+      this.logger.warn(
+        `⚠️ Impossible d'obtenir les données de la commune : ${msg}`,
+      );
       // On continue avec des données par défaut
     }
 

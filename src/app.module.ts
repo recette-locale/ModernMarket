@@ -14,6 +14,9 @@ import { DistributionZoneModule } from './distribution_zone/distribution_zone.mo
 import { TypeLocalModule } from './type_local/type_locale.module';
 import { ScheduleModule } from '@nestjs/schedule';
 import { SocketModule } from './socket/socket.module';
+import { MarketModule } from './market/market.module';
+import { CommercantModule } from './commercant/commercant.module';
+import { TicketModule } from './ticket/ticket.module';
 
 
 
@@ -41,6 +44,9 @@ import { SocketModule } from './socket/socket.module';
     TypeLocalModule,
     DistributionZoneModule,
     SocketModule,
+    MarketModule,
+    CommercantModule,
+    TicketModule,
 
 
   ],

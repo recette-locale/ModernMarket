@@ -7,8 +7,9 @@ import { TypeOrmModule } from '@nestjs/typeorm';
 import { HttpService } from '@nestjs/axios';
 
 import { SocketModule } from 'src/socket/socket.module';
+import { Market } from 'src/market/entities/market.entity';
 @Module({
-  imports: [TypeOrmModule.forFeature([Zone]),
+  imports: [TypeOrmModule.forFeature([Zone, Market]),
   HttpModule.register({ timeout: 5000, maxRedirects: 5 }),
   SocketModule
   ],
